@@ -24,7 +24,7 @@ git --version
 ## Step 3 — Clone the Project
 
 In the VS Code terminal:
-git clone https://github.com/YOUR_USERNAME/SafetyDevice.git
+git clone https://github.com/bran-aviles/SafetyDevice.git
 cd SafetyDevice
 
 ---
