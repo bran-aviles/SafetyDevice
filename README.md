@@ -69,6 +69,35 @@ You should see:
 
 ---
 
+## Step 8 — Connect via nRF Connect
+
+1. Open nRF Connect on your phone
+2. Tap **Scan**
+3. Find **SafetyDevice** in the list and tap **Connect**
+4. The onboard LED will turn solid blue when connected
+5. The serial monitor will print:
+```
+[BLE] Device connected
+```
+
+---
+
+## Step 9 — View Messages from the ESP32
+
+Once connected in nRF Connect:
+
+1. Tap the **Client** tab at the top of the connected device screen
+2. Scroll down and tap the service UUID starting with **4fafc201**
+3. Find the characteristic starting with **beb5483e**
+4. Tap the **down arrow with underline ⬇** next to the characteristic 
+   to subscribe to notifications
+5. Messages from the ESP32 will now appear directly below the 
+   characteristic in real time and look like this:
+```json
+{"type":"HEART","bpm":72,"baseline_ready":false,"unconscious":false}
+```
+---
+
 ## BLE
 - **Device name:** SafetyDevice
 - **Service UUID:** 4fafc201-1fb5-459e-8fcc-c5c9c331914b
