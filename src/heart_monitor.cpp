@@ -156,7 +156,7 @@ void heartMonitorInit() {
     lastUpdateMs       = 0;
 
     // I2C on ESP32-C3 default pins
-    Wire.begin(8,9);
+    Wire.begin(5,6);
 
     if (!sensor.begin(Wire, I2C_SPEED_FAST)) {
         // Sensor not found — sensorReady stays false
