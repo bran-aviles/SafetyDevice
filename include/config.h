@@ -38,3 +38,9 @@
 #define LED_PIN          8    // WS2812 data pin on ESP32-C3 DevKit
 #define LED_COUNT        1    // one onboard LED
 #define LED_BRIGHTNESS   50   // 0–255, keep low to avoid washing out
+
+// ── LSM6DSOX / Fall Detect ─────────────────────────────────────────────────
+#define LSM_INT1_PIN          9      // GPIO9 — LSM6DSOX INT1 interrupt pin
+#define LSM_I2C_ADDR          0x6A   // SDO tied to GND = 0x6A 
+#define FALL_CONFIRM_MS       100   // ms window to confirm fall after interrupt
+#define FALL_COOLDOWN_MS      5000  // ms before another fall can be detected
