@@ -30,9 +30,7 @@
 #define FREE_FALL_MIN_MS    80    // minimum ms below 0.4g to confirm free-fall
 
 // Confidence levels — must be strings, passed as JSON values in BLE payload
-#define CONFIDENCE_LOW            "LOW"
 #define CONFIDENCE_MEDIUM         "MEDIUM"
-#define CONFIDENCE_HIGH           "HIGH"
 #define CONFIDENCE_CRITICAL       "CRITICAL"
 
 // ── BLE 

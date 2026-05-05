@@ -159,11 +159,10 @@ static void resetFastBPM() {
 // fast as the sensor allows rather than waiting up to 1s between checks.
 //
 // Result values:
-//   0   = still watching (pathAActive = true) OR not yet armed
-//   +2  = strong spike ≥15 BPM  — high gunshot confidence
-//   +1  = moderate rise 8–14 BPM after 10s — supports gunshot
-//   -1  = flat HR after 10s with no meaningful rise — reduces confidence
-//   -2  = HR actively dropped (stress response absent) — strongly against
+//   +2  = strong spike ≥15 BPM  — Critical gunshot confidence
+//   -1  = Sound + fall, but HR flat
+//   -1  = Sound + HR spike, but no fall
+// 
 //
 // IMPORTANT FOR FUSION: pathAResult = 0 while pathAActive = true means
 // "still watching, not enough time has passed". Fusion must check
@@ -210,39 +209,18 @@ static void runPathA(uint8_t bpm) {
         pathAActive = false;
         Serial.print("[HR] Path A — strong HR spike +");
         Serial.print(rise);
-        Serial.println(" BPM — high gunshot confidence");
-        return;
-    }
-
-    // ── Moderate rise — confirm after 10s to rule out transient jitter (+1) 
-    if (rise >= 8 && elapsed > 10000) {
-        pathAResult = 1;
-        pathAActive = false;
-        Serial.print("[HR] Path A — moderate HR rise +");
-        Serial.print(rise);
-        Serial.println(" BPM — supports gunshot confidence");
+        Serial.println(" BPM — CRITICAL high gunshot confidence");
         return;
     }
 
     // ── Early flat conclusion at 10s (-1)
-    // If rise is still below 8 BPM after 10 seconds, HR is flat.
-    if (elapsed > 10000 && rise < 8) {
+    // If HR is below +15 BPM after 10 seconds, HR is flat.
+    if (elapsed > 10000) {
         pathAResult = -1;
         pathAActive = false;
-        Serial.print("[HR] Path A — flat HR at 10s, rise only ");
+        Serial.print("[HR] Path A — no meanigful spike, rise only ");
         Serial.print(rise);
-        Serial.println(" BPM — reduces gunshot confidence");
-        return;
-    }
-
-    // ── HR actively dropped — strong negative signal (-2)
-    // A drop of 5+ BPM means the person is calm — strongly against gunshot
-    if (rise <= -5 && elapsed > 5000) {
-        pathAResult = -2;
-        pathAActive = false;
-        Serial.print("[HR] Path A — HR dropped ");
-        Serial.print(rise);
-        Serial.println(" BPM — strongly reduces gunshot confidence");
+        Serial.println(" BPM - MEDIUM gunshot confidence");
         return;
     }
 
@@ -250,9 +228,7 @@ static void runPathA(uint8_t bpm) {
     if (elapsed > PATH_A_WINDOW_MS) {
         pathAResult = -1;
         pathAActive = false;
-        Serial.print("[HR] Path A — window expired, rise only ");
-        Serial.print(rise);
-        Serial.println(" BPM — flat HR, reduces gunshot confidence");
+        Serial.print("[HR] Path A — window expired, no spike");
     }
 }
 

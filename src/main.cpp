@@ -110,8 +110,7 @@ void loop() {
 
             bool hasFall    = fallDuringEvent;
             bool strongHR   = (pathAResult == 2);
-            bool moderateHR = (pathAResult == 1);
-            bool flatHR     = (pathAResult == -1 || pathAResult == -2);
+            bool flatHR     = (pathAResult == -1);
             bool noHRData   = (pathAResult == 0);
 
             // ── Log fusion inputs 
@@ -120,53 +119,30 @@ void loop() {
             Serial.print(hasFall ? "YES" : "NO");
             Serial.print("  HR=");
             if      (strongHR)   Serial.println("SPIKE(+2)");
-            else if (moderateHR) Serial.println("MODERATE(+1)");
-            else if (flatHR)     Serial.println("FLAT(-1/-2)");
+            else if (flatHR)     Serial.println("FLAT(-1/-1)");
             else                 Serial.println("NO_DATA(0)");
 
             // ── Confidence matrix 
             //
             // All three agree — highest confidence
             if (hasFall && strongHR) {
-                Serial.println("[FUSION] GUNSHOT — CRITICAL CONFIDENCE");
+                Serial.println("[FUSION] GUNSHOT — CRITICAL");
                 Serial.println("[FUSION] Sound + fall + strong HR spike");
                 alertManagerSendGunshot(CONFIDENCE_CRITICAL);
 
-            // Sound + fall + moderate HR
-            } else if (hasFall && moderateHR) {
-                Serial.println("[FUSION] GUNSHOT — HIGH CONFIDENCE");
-                Serial.println("[FUSION] Sound + fall + moderate HR rise");
-                alertManagerSendGunshot(CONFIDENCE_HIGH);
-
-            // Sound + fall, no HR sensor worn
-            } else if (hasFall && noHRData) {
-                Serial.println("[FUSION] GUNSHOT — MEDIUM CONFIDENCE");
-                Serial.println("[FUSION] Sound + fall — no HR data");
+            // Sound and fall but HR flat
+            } else if (hasFall && (flatHR || noHRData)) {
+                Serial.println("[FUSION] GUNSHOT — MEDIUM");
+                Serial.println("[FUSION] Sound + fall — HR inconclusive");
                 alertManagerSendGunshot(CONFIDENCE_MEDIUM);
 
-            // Sound + fall but HR flat — could be vasovagal response,
-            // sensor issue, or false positive. Fall is hard evidence
-            // so don't suppress entirely — send LOW
-            } else if (hasFall && flatHR) {
-                Serial.println("[FUSION] GUNSHOT — LOW CONFIDENCE");
-                Serial.println("[FUSION] Sound + fall — HR did not rise");
-                alertManagerSendGunshot(CONFIDENCE_LOW);
-
-            // Sound + strong HR spike, no fall — person may still be
-            // standing (grazed shot, non-incapacitating wound)
+            // Sound and HR spike but no fall
             } else if (!hasFall && strongHR) {
-                Serial.println("[FUSION] GUNSHOT — MEDIUM CONFIDENCE");
+                Serial.println("[FUSION] GUNSHOT — MEDIUM");
                 Serial.println("[FUSION] Sound + HR spike — no fall");
-                alertManagerSendGunshot(CONFIDENCE_MEDIUM);
+            alertManagerSendGunshot(CONFIDENCE_MEDIUM);
 
-            // Sound + moderate HR, no fall
-            } else if (!hasFall && moderateHR) {
-                Serial.println("[FUSION] GUNSHOT — LOW CONFIDENCE");
-                Serial.println("[FUSION] Sound + moderate HR — no fall");
-                alertManagerSendGunshot(CONFIDENCE_LOW);
-
-            // Sound only with flat HR and no fall — false positive
-            // (clap, slam, dropped object)
+            // Sound but no HR or no fall
             } else {
                 Serial.println("[FUSION] FALSE POSITIVE SUPPRESSED");
                 Serial.print("[FUSION] Reason: ");
