@@ -1,50 +1,164 @@
-# SafetyDevice
+# 🛡️ SafetyDevice
 
-Wearable safety device using ESP32-C3 that detects gunshots, falls, and 
-potential unconsciousness and sends BLE alerts to a Flutter mobile app.
+> A prototype ESP32-C3 device that detects gunshots, falls, and abnormal heart rate responses — then sends real-time BLE alerts with confidence levels to an nRF Connect app.
 
-### Setup
-## Step 1 — Install VS Code Extensions
+![Platform](https://img.shields.io/badge/platform-ESP32--C3-blue)
+![Framework](https://img.shields.io/badge/framework-PlatformIO-orange)
+![Language](https://img.shields.io/badge/language-C%2B%2B-brightgreen)
+![BLE](https://img.shields.io/badge/connectivity-BLE-blueviolet)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-1. Open VS Code
-2. Go to Extensions (Ctrl+Shift+X)
+---
+
+## 📖 Overview
+
+SafetyDevice uses three independent sensors and fuses their evidence together before deciding whether to send an alert, dramatically reducing false positives from everyday loud noises like car backfires, door slams, or dropped objects.
+
+| Sensor | Chip | Detects |
+|---|---|---|
+| Microphone | SPH0645 | Gunshot audio signature |
+| IMU | LSM6DSOX | Falls via free-fall + impact |
+| Pulse Oximeter | MAX30102 | Heart rate + adrenaline response |
+
+---
+
+## 🧠 How It Works
+
+### 🔊 Audio Detection
+Listens to a SPH0645 digital microphone sampled at 32,000 times per second. Rather than recognising what a gunshot sounds like, it looks for the physical signature a gunshot leaves in the audio signal, a sudden massive volume spike, a brief period where the microphone maxes out completely, followed by a fast decay back to silence. All three must happen in the right order within tight time windows. Audio detection is suppressed for 3 seconds after a fall impact to prevent the thud from triggering a false alert.
+
+### 🤸 Fall Detection
+Reads the LSM6DSOX accelerometer 416 times per second and looks for a two-stage pattern:
+1. **Weightlessness** - total g-force below 0.4g for at least 80ms (distinguishes a real fall from a wrist shake, which only dips briefly)
+2. **Impact** - g-force spike above 2.5g within 600ms of the weightless phase
+
+Both stages must occur in order. A standalone fall sends a fall alert directly. A fall during an active gunshot window is held and fed into the fusion engine instead.
+
+### ❤️ Heart Monitor + Path A
+Reads a MAX30102 pulse oximeter via infrared light. BPM is calculated from the time between beats, stabilised with a 10-beat rolling average, and protected by a motion gate that discards beats arriving during wrist movement.
+
+When a gunshot sound is detected, **Path A** activates — it records the person's baseline heart rate and watches for an adrenaline response over 30 seconds:
+
+| Heart Rate Response | Score | Meaning |
+|---|---|---|
+| Rise of 15+ BPM | +2 | Strong adrenaline spike |
+| Rise of 8–14 BPM after 10s | +1 | Moderate rise |
+| Flat after 10s | -1 | No stress response |
+| Drop of 5+ BPM | -2 | Person is calm |
+
+> ⚠️ Path A bypasses the outlier rejection filter so genuine adrenaline spikes are never silently discarded before reaching the detector.
+
+### 🔀 Fusion Engine
+After a gunshot sound is detected the system waits for Path A to conclude then combines all sensor evidence into a single confidence level:
+
+| Audio | Fall | Heart Rate | Confidence |
+|---|---|---|---|
+| ✅ | ✅ | Strong spike (+2) | 🔴 CRITICAL |
+| ✅ | ✅ | Moderate rise (+1) | 🟠 HIGH |
+| ✅ | ✅ | No data | 🟡 MEDIUM |
+| ✅ | ✅ | Flat (-1/-2) | 🟢 LOW |
+| ✅ | ❌ | Strong spike (+2) | 🟡 MEDIUM |
+| ✅ | ❌ | Moderate rise (+1) | 🟢 LOW |
+| ✅ | ❌ | Flat / no data | ⬜ Suppressed |
+
+### 💡 Alert Manager
+Sends JSON payloads over BLE to the connected phone app. Manages a cooldown between alerts to prevent spam. Drives a NeoPixel LED — slow blue pulse while waiting for a connection, solid blue when connected.
+
+### 🔋 Power Manager
+Hold the button on pin 7 for 1 second to enter light sleep (~10µA current draw). Unlike deep sleep, light sleep resumes exactly where it left off — all sensor state is preserved. The phone app is notified before sleeping and after waking so the UI stays in sync.
+
+---
+
+## 📡 BLE Interface
+
+| Property | Value |
+|---|---|
+| Device Name | `SafetyDevice` |
+| Service UUID | `4fafc201-1fb5-459e-8fcc-c5c9c331914b` |
+| Characteristic UUID | `beb5483e-36e1-4688-b7f5-ea07361b26a8` |
+
+**Alert payloads:**
+```json
+{"type": "GUNSHOT", "confidence": "CRITICAL"}
+{"type": "GUNSHOT", "confidence": "HIGH"}
+{"type": "GUNSHOT", "confidence": "MEDIUM"}
+{"type": "GUNSHOT", "confidence": "LOW"}
+{"type": "FALL",    "confidence": "HIGH"}
+{"type": "DEVICE_SLEEP"}
+{"type": "DEVICE_WAKE"}
+```
+
+**Live BPM payload (sent every second when connected):**
+```json
+{"bpm": 72, "baseline_ready": true}
+```
+
+---
+
+## 🗂️ Project Structure
+
+```
+SafetyDevice/
+├── src/
+│   ├── main.cpp                   # Fusion engine, event coordination
+│   ├── audio_detect.h / .cpp      # Gunshot detection via microphone signature
+│   ├── heart_monitor.h / .cpp     # MAX30102 BPM + Path A adrenaline detection
+│   ├── fall_detect.h  / .cpp      # LSM6DSOX two-stage fall detection
+│   ├── alert_manager.h / .cpp     # BLE alerts, cooldown, LED status
+│   └── power_manager.h / .cpp     # Hold-to-sleep, light sleep, wake handling
+├── include/
+│   └── config.h                   # All shared constants and thresholds
+├── test/
+│   ├── test_audio_detect/         # 4 passing tests on ESP32-C3
+│   └── test_heart_monitor/        # 8 passing tests on ESP32-C3
+└── platformio.ini
+```
+
+---
+
+## 🚀 Getting Started
+
+### Step 1 — Install VS Code + PlatformIO
+1. Install [VS Code](https://code.visualstudio.com)
+2. Open Extensions (`Ctrl+Shift+X`)
 3. Search **PlatformIO IDE** and install it
 4. Restart VS Code when prompted
 
 ---
 
-## Step 2 — Install Git
-
+### Step 2 — Install Git
 Download and install from https://git-scm.com
-Verify it worked by opening a terminal and typing:
+
+Verify:
+```bash
 git --version
+```
 
 ---
 
-## Step 3 — Clone the Project
-
-In the VS Code terminal:
+### Step 3 — Clone the Repository
+```bash
 git clone https://github.com/YOUR_USERNAME/SafetyDevice.git
 cd SafetyDevice
+```
 
 ---
 
-## Step 4 — Find Your COM Port
-> ⚠️ All `pio` commands must be run in the **PlatformIO Core CLI terminal**,
-> not the regular VS Code terminal.
-> To open it:
-> **VS Code bottom toolbar → PlatformIO alien head icon → Quick Access → 
-> Miscellaneous → PlatformIO Core CLI**
+### Step 4 — Find Your COM Port
 
-In the PlatformIO Core CLI run:
+> ⚠️ All `pio` commands must be run in the **PlatformIO Core CLI terminal**, not the regular VS Code terminal.
+>
+> To open it: **VS Code bottom toolbar → PlatformIO alien icon → Quick Access → Miscellaneous → PlatformIO Core CLI**
+
+```bash
 pio device list
-Look for **CP210x** or **Silicon Labs** — note the port (e.g. `COM5`).
+```
+Look for **CP210x** or **Silicon Labs** — note the port (e.g. `COM5` on Windows, `/dev/ttyUSB0` on Linux/Mac).
 
 ---
 
-## Step 5 — Set Your COM Port
-
-Open `platformio.ini` and update these two lines with your port:
+### Step 5 — Set Your COM Port
+Open `platformio.ini` and update:
 ```ini
 monitor_port = COM5
 upload_port  = COM5
@@ -52,47 +166,45 @@ upload_port  = COM5
 
 ---
 
-## Step 6 — Upload the Code
-
-In the PlatformIO Core CLI run:
+### Step 6 — Upload
+```bash
 pio run -e esp32-c3-devkitm-1 --target upload
+```
 
 ---
 
-## Step 7 — Open Serial Monitor
-
-In the PlatformIO Core CLI run:
+### Step 7 — Open Serial Monitor
+```bash
 pio device monitor --port COM5 --baud 115200
+```
 
-You should see:
-[BLE] Ready — waiting for connection
+On successful boot you should see:
+```
+[BLE]   Ready — waiting for connection
+[FALL]  Fall detection active
+[HR]    MAX30102 ready — medium power, 4x HW averaging
+[AUDIO] SPH0645 I2S ready
+[MAIN]  All modules ready
+[MAIN]  Three-way fusion: audio + fall + HR active
+```
 
 ---
 
-## BLE
-- **Device name:** SafetyDevice
-- **Service UUID:** 4fafc201-1fb5-459e-8fcc-c5c9c331914b
-- **Characteristic UUID:** beb5483e-36e1-4688-b7f5-ea07361b26a8
-- **Payload format:** `{"type":"GUNSHOT","confidence":"HIGH","co_occurrence":"NONE"}`
-
-## Project Structure
-src/
-├── main.cpp
-├── audio_detect.h / .cpp      — gunshot detection via microphone saturation
-├── heart_monitor.h / .cpp     — MAX30102 BPM, unconsciousness detection
-└── alert_manager.h / .cpp     — BLE alerts, cooldown, co-occurrence, LED
-include/
-└── config.h                   — all shared constants and thresholds
-test/
-├── test_audio_detect/         — 4 passing tests on ESP32-C3
-└── test_heart_monitor/        — 8 passing tests on ESP32-C3
-
-## Module Status
+## 📊 Module Status
 
 | Module | Status |
 |---|---|
-| audio_detect | Done — tested on device |
-| heart_monitor | Done — real MAX30102 integration |
-| alert_manager | Done — BLE notify + LED working |
-| fall_detect | In progress |
+| `audio_detect` | ✅ Done — tested on device |
+| `heart_monitor` | ✅ Done — real MAX30102 integration |
+| `alert_manager` | ✅ Done — BLE notify + LED working |
+| `fall_detect` | ✅ Done — LSM6DSOX two-stage detection |
+| `power_manager` | ✅ Done — light sleep + button hold |
+| Fusion engine | ✅ Done — three-way confidence matrix |
+
+---
+
+## 📄 License
+
+MIT License — see [LICENSE](LICENSE) for details.
+
 | fusion_logic | In progress |
