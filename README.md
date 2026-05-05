@@ -37,7 +37,7 @@ Both stages must occur in order. A standalone fall sends a fall alert directly. 
 ### ❤️ Heart Monitor + Path A
 Reads a MAX30102 pulse oximeter via infrared light. BPM is calculated from the time between beats, stabilised with a 10-beat rolling average, and protected by a motion gate that discards beats arriving during wrist movement.
 
-When a gunshot sound is detected, **Path A** activates — it records the person's baseline heart rate and watches for an adrenaline response over 30 seconds:
+When a gunshot sound is detected, **Path A** activates, it records the person's baseline heart rate and watches for an adrenaline response over 30 seconds:
 
 | Heart Rate Response | Score | Meaning |
 |---|---|---|
