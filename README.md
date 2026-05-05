@@ -42,9 +42,7 @@ When a gunshot sound is detected, **Path A** activates, it records the person's 
 | Heart Rate Response | Score | Meaning |
 |---|---|---|
 | Rise of 15+ BPM | +2 | Strong adrenaline spike |
-| Rise of 8–14 BPM after 10s | +1 | Moderate rise |
 | Flat after 10s | -1 | No stress response |
-| Drop of 5+ BPM | -2 | Person is calm |
 
 > ⚠️ Path A bypasses the outlier rejection filter so genuine adrenaline spikes are never silently discarded before reaching the detector.
 
@@ -53,12 +51,9 @@ After a gunshot sound is detected the system waits for Path A to conclude then c
 
 | Audio | Fall | Heart Rate | Confidence |
 |---|---|---|---|
-| ✅ | ✅ | Strong spike (+2) | 🔴 CRITICAL |
-| ✅ | ✅ | Moderate rise (+1) | 🟠 HIGH |
-| ✅ | ✅ | No data | 🟡 MEDIUM |
-| ✅ | ✅ | Flat (-1/-2) | 🟢 LOW |
-| ✅ | ❌ | Strong spike (+2) | 🟡 MEDIUM |
-| ✅ | ❌ | Moderate rise (+1) | 🟢 LOW |
+| ✅ | ✅ | Spike 15+ BPM | 🔴 CRITICAL |
+| ✅ | ✅ | Flat/No data | 🟡 MEDIUM |
+| ✅ | ❌ | Spike 15+ BPM | 🟡 MEDIUM |
 | ✅ | ❌ | Flat / no data | ⬜ Suppressed |
 
 ### 💡 Alert Manager
@@ -80,9 +75,7 @@ Hold the button on pin 7 for 1 second to enter light sleep (~10µA current draw)
 **Alert payloads:**
 ```json
 {"type": "GUNSHOT", "confidence": "CRITICAL"}
-{"type": "GUNSHOT", "confidence": "HIGH"}
 {"type": "GUNSHOT", "confidence": "MEDIUM"}
-{"type": "GUNSHOT", "confidence": "LOW"}
 {"type": "FALL",    "confidence": "HIGH"}
 {"type": "DEVICE_SLEEP"}
 {"type": "DEVICE_WAKE"}
