@@ -33,6 +33,7 @@ void setup() {
 
 void loop() {
     // ── Always run all modules
+    powerManagerUpdate();    // check for hold-to-sleep first
     heartMonitorUpdate();
     fallDetectUpdate();
     alertManagerUpdate();

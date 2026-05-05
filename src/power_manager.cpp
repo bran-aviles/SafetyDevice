@@ -7,7 +7,7 @@
 
 // ── Power button state 
 #define POWER_BTN_PIN           7       // IO7 — connected to GND via button
-#define POWER_BTN_HOLD_MS       2000    // hold 2s to trigger sleep/wake
+#define POWER_BTN_HOLD_MS       1000    // hold 1s to trigger sleep/wake
 #define DEBOUNCE_MS             50
 
 static uint32_t btnPressStartMs = 0;

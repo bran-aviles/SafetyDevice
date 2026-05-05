@@ -160,10 +160,8 @@ static void resetFastBPM() {
 //
 // Result values:
 //   +2  = strong spike ≥15 BPM  — Critical gunshot confidence
-//   -1  = Sound + fall, but HR flat
-//   -1  = Sound + HR spike, but no fall
+//   -1  = Flat after 10s
 // 
-//
 // IMPORTANT FOR FUSION: pathAResult = 0 while pathAActive = true means
 // "still watching, not enough time has passed". Fusion must check
 // heartMonitorPathAActive() before treating 0 as inconclusive — if Path A
