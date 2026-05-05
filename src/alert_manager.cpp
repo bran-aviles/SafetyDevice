@@ -200,3 +200,8 @@ void alertManagerSendRaw(const char* payload) {
     pAlertCharacteristic->notify();
     Serial.println("[BLE] Raw sent: " + String(payload));
 }
+
+void alertManagerLEDOff() {
+    led.clear();
+    led.show();
+}

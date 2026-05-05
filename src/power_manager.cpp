@@ -28,12 +28,13 @@ static void enterLightSleep() {
         delay(100);   // give BLE stack time to transmit before sleeping
     }
 
+    alertManagerLEDOff();    // ← ADD THIS — turn LED off before sleeping
+
     Serial.flush();
     delay(200);
 
     gpio_wakeup_enable((gpio_num_t)POWER_BTN_PIN, GPIO_INTR_LOW_LEVEL);
     esp_sleep_enable_gpio_wakeup();
-
     esp_light_sleep_start();
 
     // ── Execution resumes here after wake 

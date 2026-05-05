@@ -24,3 +24,5 @@ void alertManagerSendFall(const char* confidence);
 // Sends any raw JSON string directly 
 // Used for live data broadcasts like BPM during testing
 void alertManagerSendRaw(const char* payload);
+
+void alertManagerLEDOff();
