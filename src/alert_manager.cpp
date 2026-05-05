@@ -130,6 +130,12 @@ void alertManagerInit() {
     BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
     pAdvertising->addServiceUUID(SERVICE_UUID);
     pAdvertising->setScanResponse(true);
+
+
+    // ADD THESE TWO LINES before startAdvertising()
+    pAdvertising->setMinInterval(1600);   // 500ms  (units are 0.625ms, so 800 × 0.625 = 500ms)
+    pAdvertising->setMaxInterval(1600);
+
     BLEDevice::startAdvertising();
 
     Serial.println("[BLE] Ready — waiting for connection");
@@ -141,7 +147,7 @@ void alertManagerUpdate() {
     if (alertManagerIsConnected()) {
         // Turn LED solid blue once connected to BLE
         if (!ledConnectedSet) {
-            led.setPixelColor(0, led.Color(0, 0, 255));
+            led.setPixelColor(0, led.Color(0, 0, 60));
             led.show();
             ledConnectedSet = true;
         }
@@ -154,9 +160,9 @@ void alertManagerUpdate() {
             lastPulseMs = now;
 
             if (pulseDirection == 1) {
-                pulseBrightness += 3;
-                if (pulseBrightness >= 150) {
-                    pulseBrightness = 150;
+                pulseBrightness += 1;
+                if (pulseBrightness >= 30) {
+                    pulseBrightness = 30;
                     pulseDirection  = 0;
                 }
             } else {
@@ -164,7 +170,7 @@ void alertManagerUpdate() {
                     pulseBrightness = 0;
                     pulseDirection  = 1;
                 } else {
-                    pulseBrightness -= 3;
+                    pulseBrightness -= 1;
                 }
             }
 
