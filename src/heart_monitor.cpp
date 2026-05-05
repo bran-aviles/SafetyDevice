@@ -3,233 +3,552 @@
 #include <Arduino.h>   
 #include <Wire.h>
 #include "MAX30105.h"        // SparkFun MAX3010x library
-#include "heartRate.h"       // SparkFun beat detection algorithm
+#include "heartRate.h"       // SparkFun beat detection algorithm contains checkforBeat()
 
-// ── MAX30102 sensor instance ─────────────────────────────────────────────────
-static MAX30105 sensor;
 
-// ── Beat detection state (SparkFun algorithm) ────────────────────────────────
-static const  uint8_t BEAT_HISTORY  = 4;       // average over last 4 beats
-static long   beatDeltas[BEAT_HISTORY]          = {0};
-static uint8_t beatIndex                        = 0;
-static long    lastBeatTime                     = 0;
-static bool    sensorReady                      = false;
+//Description:
+// MAX30102 sensor shines infrared light into the skin 400 times per second
+// each heartbeat creates a distinct pulse in that IR signal.
+//
+// The code measures the time between those pulses and divides 60,000 by that gap to get BPM
+// Before trusting any readings it waits for a stable finger, discards the first 6 warmup beats
+// filters out motion artifacts using accelerometer data
+// runs a 10-beat rolling average to keep the display smooth
+//
+// Smoothing filter only applies to the display
+//
+//  Path A — the adrenaline detector — sees every raw beat first, unfiltered
+//  because a genuine stress response is exactly the large sudden jump the filter would have thrown away.
+//
+// Path A activates the moment a gunshot sound is detected
+//  It records the person's baseline HR and watches for up to 30 seconds
+//  scoring the biological response from -2 to +2.
+//  That score feeds into the fusion system alongside the audio evidence to make a final confidence decision
 
-// ── Constants ───────────────────────────────────────────────────────────────
+// ── Sensor instance 
+static MAX30105 sensor;  // Actual MAX30105 sensor object
+static bool     sensorReady = false; // Safety Flag
 
-#define BASELINE_BUFFER_SIZE     60      // one BPM reading per second = 60s window
-#define SUSTAIN_SECONDS          10      // how long drop must persist before flagging
-#define PATH_A_WINDOW_MS         5000    // how long to watch HR after audio event
-#define FALL_SUPPRESS_MS         2000    // ignore HR readings after fall
-#define BPM_FLOOR                60      // absolute minimum before flagging
-#define BASELINE_DROP_PCT        20      // % drop from baseline to flag
-#define PATH_A_CHANGE_THRESHOLD  5       // BPM delta that counts as "changed" for Path A
-#define UPDATE_INTERVAL_MS       1000    // sample HR once per second
-
-// ── Internal state ──────────────────────────────────────────────────────────
-
-// Rolling baseline buffer — stores last 60 BPM readings
-static uint8_t  baselineBuffer[BASELINE_BUFFER_SIZE];
-static int      baselineIndex    = 0;
-static int      baselineFilled   = 0;    // counts up to BASELINE_BUFFER_SIZE then stays
-
-// Current BPM
+// ── Heart rate state 
 static uint8_t  currentBPM       = 0;
 
-// Path B — unconsciousness tracking
-static int      sustainedDropSec = 0;    // consecutive seconds below threshold
-static bool     unconsciousFlag  = false;
+// ── BPM smoothing 
+// Keeps the last 10 BPM readings in an array and averages them
+// Smoothes out the beat to beat BPM (raw beat to beat jumps around a lot)
+#define BPM_SMOOTH_SIZE      10
+static uint8_t  bpmHistory[BPM_SMOOTH_SIZE] = {0}; // array storing last 10 readings
+static uint8_t  bpmHistoryIndex  = 0; // which slot to write the next reading into
+static uint8_t  bpmHistoryFilled = 0; // how many slots have real data so far
 
-// Suppression after fall
+// ── Beat detection state 
+#define BEAT_HISTORY               6  // throw away the first 6 beats while the algorithm "warms up" and stabilizes
+static long     lastBeatTime     = 0; // timestamp of the last detected beat, used to calculate time between beats
+static uint8_t  beatIndex        = 0; // counts how many warmup beats have passed
+static bool     warmupDone       = false;  // flag for "are we past warmup yet"
+
+// ── Finger detection 
+static bool     fingerPresent        = false; 
+static bool     fingerStable         = false;
+static uint8_t  fingerStableCount    = 0;
+#define FINGER_STABLE_THRESHOLD      10 // needs 10 consecutive good readings before declared stable
+
+// ── Baseline Buffer
+// Stores the last 60 seconds of BPM readings (one per second)
+// Gives a reliable "normal" heart rate for the person
+#define BASELINE_BUFFER_SIZE  60
+static uint8_t  baselineBuffer[BASELINE_BUFFER_SIZE];
+static int      baselineIndex    = 0;
+static int      baselineFilled   = 0;
+
+// ── Fall suppression 
+// If a fall is detected, ignore heart rate readings for 2 seconds
 static bool     fallSuppressActive = false;
 static uint32_t fallSuppressStart  = 0;
+#define FALL_SUPPRESS_MS             2000
 
-// Path A — post-audio HR consistency check
-static bool     pathAActive        = false;
-static uint32_t pathAStartMs       = 0;
-static uint8_t  pathABaseBPM       = 0;  // BPM at moment of audio event
-static int8_t   pathAResult        = 0;  // +1, -1, or 0
+// ── Path A — post-gunshot HR consistency
+// When a gunshot sound is detected, it watches to see if the person's heart rate spikes
+static bool     pathAActive      = false;
+static uint32_t pathAStartMs     = 0;
+static uint8_t  pathABaseBPM     = 0;
+static int8_t   pathAResult      = 0;
 
-// Timing
-static uint32_t lastUpdateMs       = 0;
+// ── Timing 
+static uint32_t lastUpdateMs          = 0;
+#define UPDATE_INTERVAL_MS            1000
 
-// BPM source
-// Returns 0 if reading is unreliable (motion artifact window active).
-static uint8_t readBPM() {
-    if (fallSuppressActive) {
-        if ((millis() - fallSuppressStart) < FALL_SUPPRESS_MS) {
-            return 0;
-        }
-        fallSuppressActive = false;
+// ── Outlier rejection state 
+static uint8_t  consecutiveRejections = 0;
+
+// ── Motion-gated beat suppression 
+// If the person's wrist moves, it creates fake "beats" in the sensor
+static float    lastMotionG      = 1.0f;
+static float    peakMotionG      = 1.0f; // highest motion reading in the last 150ms
+static uint32_t peakMotionMs     = 0; 
+#define MOTION_BEAT_SUPPRESS_G   1.08f // anything above 1.08g means too much motion, ignore bats
+#define MOTION_PEAK_HOLD_MS      150 // hold the peak for 150ms because the motion spike and the fake beat don't arrive at exactly the same time
+
+// ── Adaptive outlier window
+// Calculates standard deviation of recent BPM readings 
+// Used to automatically tighten or loosen the outlier rejection window. 
+// Stable signal = tighter window, variable signal = wider window
+// If less than 3 readings available, returns a safe default of 6
+static float computeStdDev() {
+    if (bpmHistoryFilled < 3) return 6.0f;   // not enough data — use safe default
+    float mean = 0;
+    for (byte i = 0; i < bpmHistoryFilled; i++) mean += bpmHistory[i];
+    mean /= bpmHistoryFilled;
+    float variance = 0;
+    for (byte i = 0; i < bpmHistoryFilled; i++) {
+        float d = (float)bpmHistory[i] - mean;
+        variance += d * d;
     }
-
-    // Don't return stale init value — wait for first real beat
-    if (!sensorReady) return 0;
-
-    return currentBPM;
+    return sqrtf(variance / bpmHistoryFilled);
 }
 
-// ── Baseline helpers ─────────────────────────────────────────────────────────
-
+// ── Baseline helpers 
+// Adds a new BPM reading to the 60-second rolling baseline
+// The % BASELINE_BUFFER_SIZE makes the index wrap around 
+// when it hits slot 60 it goes back to slot 0, overwriting the oldest reading.
+// Like a circular conveyor belt.
 static void pushBaseline(uint8_t bpm) {
     baselineBuffer[baselineIndex] = bpm;
     baselineIndex = (baselineIndex + 1) % BASELINE_BUFFER_SIZE;
     if (baselineFilled < BASELINE_BUFFER_SIZE) baselineFilled++;
 }
 
-static uint8_t calcBaseline() {
+// Returns the average of however many baseline samples have been collected.
+// Used by Path A to get a stable pre-event HR reference rather than relying
+// on the instantaneous currentBPM at the moment the audio event fires.
+static uint8_t getBaselineAverage() {
     if (baselineFilled == 0) return 0;
     uint32_t sum = 0;
     for (int i = 0; i < baselineFilled; i++) sum += baselineBuffer[i];
     return (uint8_t)(sum / baselineFilled);
 }
 
-// ── Path B — unconsciousness check ──────────────────────────────────────────
+// ── Fast BPM tracker — for Path A only
+// The main smoothing buffer (BPM_SMOOTH_SIZE=10) is deliberately slow to
+// keep the displayed reading stable. Path A needs to detect a sudden HR
+// spike within seconds of an audio event, so we maintain a separate 3-beat
+// fast average that reacts quickly without polluting the stable reading.
+#define FAST_BPM_SIZE        3
+static uint8_t  fastBpmHistory[FAST_BPM_SIZE] = {0};
+static uint8_t  fastBpmIndex    = 0;
+static uint8_t  fastBpmFilled   = 0;
+static uint8_t  fastBPM         = 0;
 
-static void runPathB(uint8_t bpm) {
-    if (bpm == 0) return;   // suppress during motion artifact window
-
-    bool concernTriggered = false;
-
-    // Absolute floor check
-    if (bpm < BPM_FLOOR) {
-        concernTriggered = true;
-    }
-
-    // Rolling baseline drop check
-    if (heartMonitorBaselineReady()) {
-        uint8_t baseline = calcBaseline();
-        uint8_t dropThreshold = baseline - (baseline * BASELINE_DROP_PCT / 100);
-        if (bpm < dropThreshold) {
-            concernTriggered = true;
-        }
-    }
-
-    // Must be sustained for SUSTAIN_SECONDS consecutive seconds
-    if (concernTriggered) {
-        sustainedDropSec++;
-        if (sustainedDropSec >= SUSTAIN_SECONDS) {
-            unconsciousFlag = true;
-        }
-    } else {
-        sustainedDropSec = 0;   // reset streak if BPM recovers
-        unconsciousFlag  = false;
-    }
+static void pushFastBPM(uint8_t bpm) {
+    fastBpmHistory[fastBpmIndex % FAST_BPM_SIZE] = bpm;
+    fastBpmIndex++;
+    if (fastBpmFilled < FAST_BPM_SIZE) fastBpmFilled++;
+    uint16_t sum = 0;
+    for (byte i = 0; i < fastBpmFilled; i++) sum += fastBpmHistory[i];
+    fastBPM = (uint8_t)(sum / fastBpmFilled);
 }
 
-// ── Path A — post-gunshot HR consistency check ───────────────────────────────
+static void resetFastBPM() {
+    fastBpmIndex  = 0;
+    fastBpmFilled = 0;
+    fastBPM       = 0;
+    for (byte i = 0; i < FAST_BPM_SIZE; i++) fastBpmHistory[i] = 0;
+}
+
+// ── Path A — post-gunshot HR check
+// Called on every accepted beat (not just the 1s tick) so it reacts as
+// fast as the sensor allows rather than waiting up to 1s between checks.
+//
+// Result values:
+//   0   = still watching (pathAActive = true) OR not yet armed
+//   +2  = strong spike ≥15 BPM  — high gunshot confidence
+//   +1  = moderate rise 8–14 BPM after 10s — supports gunshot
+//   -1  = flat HR after 10s with no meaningful rise — reduces confidence
+//   -2  = HR actively dropped (stress response absent) — strongly against
+//
+// IMPORTANT FOR FUSION: pathAResult = 0 while pathAActive = true means
+// "still watching, not enough time has passed". Fusion must check
+// heartMonitorPathAActive() before treating 0 as inconclusive — if Path A
+// is no longer active and result is 0, something went wrong (finger lifted).
+//
+// Early flat conclusion at 10s:
+// If 10 seconds have passed with rise < 8 BPM, we conclude -1 immediately
+// rather than waiting the full 30s. A real adrenaline response is detectable
+// within 5–15s — if nothing has happened by 10s, HR is flat. This prevents
+// fusion from seeing result=0 and treating it as no evidence when it should
+// be treated as negative evidence.
+//
+// Full window (30s) is only needed to catch delayed moderate rises (8–14 BPM)
+// which take longer to build and confirm.
 
 static void runPathA(uint8_t bpm) {
     if (!pathAActive) return;
-    if (bpm == 0)     return;   // suppress during motion artifact window
+    if (bpm == 0)     return;
+    if (fastBPM == 0) return;
 
-    uint32_t now = millis();
+    uint32_t now     = millis();
+    uint32_t elapsed = now - pathAStartMs;
 
-    if ((now - pathAStartMs) > PATH_A_WINDOW_MS) {
-        // Window expired without a conclusion — treat as flat
-        pathAResult = -1;
+    // Require at least 3 fast samples so a single noisy beat can't decide
+    if (fastBpmFilled < 3) return;
+
+    // Calculation on how many BPM has the heart rate risen since the audio event fired
+    int rise = (int)fastBPM - (int)pathABaseBPM;
+
+    Serial.print("[HR] Path A check — base: ");
+    Serial.print(pathABaseBPM);
+    Serial.print("  fast: ");
+    Serial.print(fastBPM);
+    Serial.print("  rise: ");
+    Serial.print(rise);
+    Serial.print("  elapsed: ");
+    Serial.print(elapsed / 1000);
+    Serial.println("s");
+
+    // ── Strong spike — conclude immediately (+2)
+    if (rise >= 15) {
+        pathAResult = 2;
         pathAActive = false;
+        Serial.print("[HR] Path A — strong HR spike +");
+        Serial.print(rise);
+        Serial.println(" BPM — high gunshot confidence");
         return;
     }
 
-    int delta = (int)bpm - (int)pathABaseBPM;
-    if (delta < 0) delta = -delta;   // abs()
-
-    if (delta >= PATH_A_CHANGE_THRESHOLD) {
-        pathAResult = 1;    // HR changed — supports gunshot confidence
+    // ── Moderate rise — confirm after 10s to rule out transient jitter (+1) 
+    if (rise >= 8 && elapsed > 10000) {
+        pathAResult = 1;
         pathAActive = false;
+        Serial.print("[HR] Path A — moderate HR rise +");
+        Serial.print(rise);
+        Serial.println(" BPM — supports gunshot confidence");
+        return;
     }
-    // If window expires without change, caught by the block above on next call
+
+    // ── Early flat conclusion at 10s (-1)
+    // If rise is still below 8 BPM after 10 seconds, HR is flat.
+    if (elapsed > 10000 && rise < 8) {
+        pathAResult = -1;
+        pathAActive = false;
+        Serial.print("[HR] Path A — flat HR at 10s, rise only ");
+        Serial.print(rise);
+        Serial.println(" BPM — reduces gunshot confidence");
+        return;
+    }
+
+    // ── HR actively dropped — strong negative signal (-2)
+    // A drop of 5+ BPM means the person is calm — strongly against gunshot
+    if (rise <= -5 && elapsed > 5000) {
+        pathAResult = -2;
+        pathAActive = false;
+        Serial.print("[HR] Path A — HR dropped ");
+        Serial.print(rise);
+        Serial.println(" BPM — strongly reduces gunshot confidence");
+        return;
+    }
+
+    // ── Full window expiry (30s) — catch delayed moderate rises 
+    if (elapsed > PATH_A_WINDOW_MS) {
+        pathAResult = -1;
+        pathAActive = false;
+        Serial.print("[HR] Path A — window expired, rise only ");
+        Serial.print(rise);
+        Serial.println(" BPM — flat HR, reduces gunshot confidence");
+    }
 }
 
-// ── Public API ───────────────────────────────────────────────────────────────
+// ── Reset heart rate tracking 
+
+static void resetBeatTracking() {
+    beatIndex              = 0;
+    warmupDone             = false;
+    lastBeatTime           = 0;
+    bpmHistoryIndex        = 0;
+    bpmHistoryFilled       = 0;
+    fingerStableCount      = 0;
+    fingerStable           = false;
+    fingerPresent          = false;
+    consecutiveRejections  = 0;
+    for (byte i = 0; i < BPM_SMOOTH_SIZE; i++) bpmHistory[i] = 0;
+    currentBPM = 0;
+    resetFastBPM();
+}
+
+// ── Public API
 
 void heartMonitorInit() {
     baselineIndex      = 0;
     baselineFilled     = 0;
-    currentBPM         = 0;   
-    sustainedDropSec   = 0;
-    unconsciousFlag    = false;
     fallSuppressActive = false;
     pathAActive        = false;
     pathAResult        = 0;
     lastUpdateMs       = 0;
+    sensorReady        = false;
+    lastMotionG        = 1.0f;
+    peakMotionG        = 1.0f;
+    peakMotionMs       = 0;
 
-    // I2C on ESP32-C3 default pins
-    Wire.begin(5,6);
+    resetBeatTracking();
+
+    Wire.begin(5, 6);
+    Wire.setClock(400000);
 
     if (!sensor.begin(Wire, I2C_SPEED_FAST)) {
-        // Sensor not found — sensorReady stays false
-        // heartMonitorUpdate() will skip reads gracefully
         Serial.println("[HR] MAX30102 not found — check wiring");
         return;
     }
 
-    // ── Sensor configuration ─────────────────────────────────────────────────
-    // Sample rate 100Hz, LED pulse width 411us, ADC range 4096
-    // These settings balance current draw vs signal quality for BPM detection
-    sensor.setup(
-        60,     // LED brightness 0–255 (60 = ~1mA, enough for finger contact)
-        4,      // sample average — reduces noise, library averages 4 readings
-        2,      // LED mode 2 = Red + IR (needed for SparkFun beat algorithm)
-        100,    // sample rate Hz
-        411,    // pulse width microseconds
-        4096    // ADC range
-    );
+    // ── Medium-power setup 
+    // sampleAverage = 4  → hardware averages 4 raw samples per FIFO entry.
+    //   Cuts noise before it ever reaches beat detection. At 400Hz input
+    //   this gives an effective ~100Hz beat-detection sample rate, which is
+    //   plenty for HR and removes high-frequency motion artefacts.
+    //
+    // ledBrightness = (~5 mA).
+    //   Enough signal for fingertip placement; lower brightness reduces
+    //   ambient-light sensitivity and heat from the LED package
 
-    sensor.setPulseAmplitudeRed(0x0A);   // low red LED — proximity check only
-    sensor.setPulseAmplitudeGreen(0);    // green off — not needed for HR
+    sensor.setup(
+        0x24,   // ledBrightness — ~5.8mA (bright enough for reliable readings)
+        4,      // sampleAverage — hardware avg 4 samples
+        2,      // ledMode 2 — Red + IR only
+        400,    // sampleRate
+        411,    // pulseWidth
+        4096    // adcRange
+    );
+    sensor.setPulseAmplitudeRed(0x0A);
+    sensor.setPulseAmplitudeGreen(0);   // Green off — not used
 
     sensorReady = true;
-    Serial.println("[HR] MAX30102 ready");
-
+    Serial.println("[HR] MAX30102 ready — medium power, 4x HW averaging");
 }
 
 void heartMonitorUpdate() {
     uint32_t now = millis();
 
-    // ── Sample collection — runs every loop(), not rate limited ──────────────
-    // checkForBeat() needs 100Hz sample rate to detect peaks reliably
     if (sensorReady) {
-        long irValue = sensor.getIR();
 
-        if (irValue > 50000) {
+        // ── Fall suppression check 
+        // If suppressed, keep draining the sensor buffer but don't process any readings
+        bool suppressed = false;
+        if (fallSuppressActive) {
+            if ((now - fallSuppressStart) < FALL_SUPPRESS_MS) {
+                suppressed = true;
+            } else {
+                fallSuppressActive = false;
+            }
+        }
+
+        // ── FIFO drain 
+        // Sensor stores readings in a FIFO buffer (like a queue)
+        sensor.check(); // checks new data
+        while (sensor.available()) {
+            long irValue = sensor.getFIFOIR(); // new infrared light reading
+            sensor.nextSample();
+
+            if (suppressed) continue;
+
+            // ── Finger detection 
+            // IR below 5000 = no finger
+            // Reset everyting and skip
+            if (irValue < 5000) {
+                if (fingerPresent) {
+                    resetBeatTracking();
+                    Serial.println("[HR] Finger removed — resetting");
+                }
+                continue;
+            }
+
+            fingerPresent = true;
+
+            // ── Stabilisation gate ─
+            // Wait for 10 consecutive samples above 60000 before trusting signal.
+            if (!fingerStable) {
+                if (irValue > 60000) {
+                    fingerStableCount++;
+                    if (fingerStableCount >= FINGER_STABLE_THRESHOLD) {
+                        fingerStable = true;
+                        Serial.println("[HR] Finger stable — beat detection starting");
+                    }
+                } else {
+                    fingerStableCount = 0;
+                }
+                continue;
+            }
+
+            // ── Sample rate cap: process at most 100 samples/sec 
+            // With 4x HW averaging the FIFO delivers ~100 entries/sec, so
+            // this guard rarely fires - but kept as a safety net.
+            static uint32_t lastSampleMs = 0;
+            uint32_t nowMs = millis();
+            if ((nowMs - lastSampleMs) < 10) continue;   // was 2 ms (500Hz) — now 10 ms (100Hz)
+            lastSampleMs = nowMs;
+
+            // ── Debug: IR value every 2s
+            static uint32_t lastBeatDebug = 0;
+            if (millis() - lastBeatDebug > 2000) {
+                lastBeatDebug = millis();
+                Serial.print("[HR] In beat block — IR: ");
+                Serial.println(irValue);
+            }
+
+            // checkForBeat() is SparkFun's algorithm
+            // returns true when it detects a heartbeat in the IR signal
+            // delta is the time in milliseconds since the last beat
             if (checkForBeat(irValue)) {
-                long delta = now - lastBeatTime;
-                lastBeatTime = now;
+                long now_ms  = millis();
+                long delta   = now_ms - lastBeatTime;
 
-                if (delta > 300 && delta < 2000) {
-                    beatDeltas[beatIndex % BEAT_HISTORY] = delta;
-                    beatIndex++;
+                // Guard against stale/zero lastBeatTime on first beat
+                if (lastBeatTime == 0) {
+                    lastBeatTime = now_ms;
+                    continue;
+                }
 
-                    if (beatIndex >= BEAT_HISTORY) {
-                        long avgDelta = 0;
-                        for (uint8_t i = 0; i < BEAT_HISTORY; i++) avgDelta += beatDeltas[i];
-                        avgDelta /= BEAT_HISTORY;
-                        uint8_t bpm = (uint8_t)(60000 / avgDelta);
+                // ── Motion gate (peak-hold)
+                // Use the 150ms peak rather than the instantaneous reading —
+                // see comment on peakMotionG above for why this matters.
+                if (peakMotionG > MOTION_BEAT_SUPPRESS_G) {
+                    Serial.print("[HR] Beat suppressed — motion peak: ");
+                    Serial.print(peakMotionG, 3);
+                    Serial.println("g");
+                    continue;
+                }
 
-                        if (bpm >= 30 && bpm <= 220) {
-                            currentBPM = bpm;   // update current BPM immediately on valid beat
+                // ── Minimum beat interval guard 
+                // At 150 BPM max the shortest real inter-beat interval is
+                // 60000/150 = 400ms. Guard at 400ms exactly — double-fires
+                // from checkForBeat() on the stronger IR signal (138,000+)
+                // were arriving at 50–342ms, all safely below this floor.
+                // Real beats at 150 BPM arrive at exactly 400ms so we use
+                // strict < rather than <= to let the boundary beat through.
+                if (delta < 400) {
+                    Serial.print("[HR] Beat ignored — too soon: ");
+                    Serial.print(delta);
+                    Serial.println(" ms");
+                    continue;
+                }
+
+                //Converts time between beats into BPM
+                //60,000 ms is chosen because these are the amount of ms in a minute
+                // BPM = 60,000ms /  time between beats (ms)
+                float bpmFloat = 60000.0f / (float)delta;   // delta already in ms
+
+                // ── HR window: 40–150 BPM 
+                // Resting: 55–85 BPM. Light activity: 85–110. Moderate
+                // exercise: 110–140. Hard effort: 140–150+.
+                // Lower floor at 40 covers athletes with low resting HR.
+                // Upper ceiling at 150 covers hard physical effort while
+                // still rejecting noise above that range.
+                if (bpmFloat >= 40.0f && bpmFloat <= 150.0f) {
+                    uint8_t bpm = (uint8_t)(bpmFloat + 0.5f);   // round, don't truncate
+
+                    // ── Warmup gate 
+                    // Discard first BEAT_HISTORY beats while the algo locks on.
+                    if (!warmupDone) {
+                        beatIndex++;
+                        lastBeatTime = now_ms;
+                        consecutiveRejections = 0;
+                        Serial.print("[HR] Warmup beat ");
+                        Serial.print(beatIndex);
+                        Serial.print("/");
+                        Serial.print(BEAT_HISTORY);
+                        Serial.print(" — raw: ");
+                        Serial.println(bpm);
+                        if (beatIndex >= BEAT_HISTORY) {
+                            warmupDone = true;
+                            Serial.println("[HR] Warmup complete — accepting beats");
+                        }
+                        continue;
+                    }
+
+                    // ── Always feed Path A before outlier gate 
+                    // Path A needs to see extreme spikes (15+ BPM jumps) that are caused
+                    // by genuine adrenaline response — e.g. person has been shot.
+                    // The outlier gate exists for display stability only and must not
+                    // suppress evidence that Path A is specifically looking for.
+                    if (pathAActive) {
+                        pushFastBPM(bpm);
+                        runPathA(bpm);
+                    }
+
+                    // ── Outlier rejection ──  display smoother only
+                    // If the new beat is more than 15 BPM away from the current reading, throw it away
+                    // After 3 consecutive rejections, reset the counter and wait for a real beat
+                    if (currentBPM > 0) {
+                        int diff = (int)bpm - (int)currentBPM;
+                        if (diff < -15 || diff > 15) {
+                            consecutiveRejections++;
+                            Serial.print("[HR] Beat rejected — outlier: ");
+                            Serial.print(bpm);
+                            Serial.print("  current: ");
+                            Serial.print(currentBPM);
+                            Serial.print("  diff: ");
+                            Serial.print(diff);
+                            Serial.print("  (");
+                            Serial.print(consecutiveRejections);
+                            Serial.println(" consecutive)");
+
+                            // After 3 consecutive rejects the algo has truly
+                            // lost lock — clear the counter but do NOT touch
+                            // lastBeatTime so the next real beat still gets a
+                            // clean delta from the last accepted beat.
+                            if (consecutiveRejections >= 3) {
+                                consecutiveRejections = 0;
+                                Serial.println("[HR] Rejection counter cleared — waiting for real beat");
+                            }
+                            continue;
                         }
                     }
+
+                    // ── Accepted beat
+                    consecutiveRejections = 0;
+                    lastBeatTime = now_ms;
+
+                    // Slow rolling average — stable display reading
+                    // Adds the beat to the rolling average and recalculates current BPM
+                    bpmHistory[bpmHistoryIndex % BPM_SMOOTH_SIZE] = bpm;
+                    bpmHistoryIndex++;
+                    if (bpmHistoryFilled < BPM_SMOOTH_SIZE) bpmHistoryFilled++;
+                    uint32_t sum = 0;
+                    for (byte i = 0; i < bpmHistoryFilled; i++) sum += bpmHistory[i];
+                    currentBPM = (uint8_t)(sum / bpmHistoryFilled);
+
+                    // / Only push to fast tracker if Path A isn't active
+                    if (!pathAActive) pushFastBPM(bpm);
+
+                    Serial.print("[HR] Beat — raw: ");
+                    Serial.print(bpm);
+                    Serial.print("  smoothed: ");
+                    Serial.print(currentBPM);
+                    Serial.print("  fast: ");
+                    Serial.println(fastBPM);
+
+                    // Run Path A on every accepted beat so it reacts within
+                    // seconds rather than waiting for the 1s tick
+                    if (pathAActive) runPathA(bpm);
+                }
+                // Beats outside 40–150 still update lastBeatTime so the
+                // next inter-beat interval is calculated correctly.
+                else {
+                    lastBeatTime = now_ms;
                 }
             }
         }
     }
 
-    // ── 1 second tick — baseline + path logic ────────────────────────────────
+    // ── 1 second tick 
     if ((now - lastUpdateMs) < UPDATE_INTERVAL_MS) return;
     lastUpdateMs = now;
 
-    uint8_t bpm = readBPM();   // returns currentBPM or 0 if suppressed
+    if (currentBPM > 0) pushBaseline(currentBPM);
 
-    if (bpm > 0) {
-        pushBaseline(bpm);
-    }
-
-    runPathB(bpm);
-    runPathA(bpm);
+    // Path A is now checked per accepted beat above for faster response.
+    // The 1s tick handles the window-expiry case when no beats are arriving
+    // (e.g. finger lifted mid-window).
+    if (pathAActive) runPathA(currentBPM);
 }
+
+// ── Getters 
 
 uint8_t heartMonitorGetBPM() {
     return currentBPM;
@@ -239,23 +558,57 @@ bool heartMonitorBaselineReady() {
     return baselineFilled >= BASELINE_BUFFER_SIZE;
 }
 
-bool heartMonitorUnconsciousFlag() {
-    return unconsciousFlag;
-}
-
-void heartMonitorNotifyFall() {
-    fallSuppressActive = true;
-    fallSuppressStart  = millis();
-}
-
-void heartMonitorNotifyAudioEvent() {
-    pathAActive    = true;
-    pathAStartMs   = millis();
-    pathABaseBPM   = currentBPM;
-    pathAResult    = 0;
-}
-
 int8_t heartMonitorGetPathAResult() {
     return pathAResult;
 }
 
+// Returns true while Path A is still watching — fusion must check this
+// before interpreting pathAResult = 0 as "inconclusive". If this returns
+// false and result is 0, the finger was lifted mid-window.
+bool heartMonitorPathAActive() {
+    return pathAActive;
+}
+
+// ── External notifications
+// Called by fall detector, suppresses HR readings for 2 seconds
+void heartMonitorNotifyFall() {
+    fallSuppressActive = true;
+    fallSuppressStart  = millis();
+    Serial.println("[HR] Fall notified — suppressing readings 2 seconds");
+}
+// Called every loop by the IMU, feeds urrent acceleration so the motion gate can suppress fake beats during wrist movement
+void heartMonitorSetMotion(float motionG) {
+    lastMotionG = motionG;
+    uint32_t now = millis();
+    // Update peak: raise immediately on new high, decay after hold window
+    if (motionG > peakMotionG || (now - peakMotionMs) > MOTION_PEAK_HOLD_MS) {
+        peakMotionG  = motionG;
+        peakMotionMs = now;
+    }
+}
+
+// Called when a gunshot sound is detected — arms Path A
+// Records the baseline BPM as the reference point and clears the fast buffer so only post-event beats count
+void heartMonitorNotifyAudioEvent() {
+    pathAActive  = true;
+    pathAStartMs = millis();
+    pathAResult  = 0;
+
+    // Use the 60s rolling baseline average as the reference point if we
+    // have at least 10 seconds of history (10 samples at 1/sec).
+    // This is more reliable than instantaneous currentBPM which could be
+    // temporarily elevated (person just walked over, just sat down, etc).
+    // Falls back to currentBPM for the first 10s of operation.
+    if (baselineFilled >= 10) {
+        pathABaseBPM = getBaselineAverage();
+        Serial.print("[HR] Path A armed — baseline BPM: ");
+    } else {
+        pathABaseBPM = currentBPM;
+        Serial.print("[HR] Path A armed — base BPM (no baseline yet): ");
+    }
+    Serial.println(pathABaseBPM);
+
+    // Clear the fast buffer so Path A only measures beats that arrive
+    // *after* the audio event — pre-event readings would dilute a real spike
+    resetFastBPM();
+}

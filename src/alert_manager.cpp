@@ -7,105 +7,111 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
-#include <Adafruit_NeoPixel.h>     
+#include <Adafruit_NeoPixel.h>
 
-// ── NeoPixel instance 
+// ── NeoPixel LED object
 static Adafruit_NeoPixel led(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 // ── LED pulse state 
-static uint32_t lastPulseMs    = 0;
-static uint8_t  pulseDirection = 1;     // 1 = brightening, 0 = dimming
-static uint8_t  pulseBrightness = 0;
+static uint32_t lastPulseMs     = 0; 
+static uint8_t  pulseDirection  = 1; 
+static uint8_t  pulseBrightness = 0; 
 
-// ── BLE handles ─
-BLEServer*         pServer               = NULL;
-BLECharacteristic* pAlertCharacteristic  = NULL;
+// ── BLE handles 
+// BLEServer* acts as the server to hold data, adverstising for a central device (client)
+BLEServer*         pServer              = NULL;
+// BLECharactersistic* manages specific data values (sensor readings) on a server, sends alert messages
+BLECharacteristic* pAlertCharacteristic = NULL;
 
+static bool ledConnectedSet = false;
 
-// ── Cooldown tracking ──────────────────────────────────────────────────────
-static unsigned long lastGunshotAlert    = 0;
-static unsigned long lastFallAlert       = 0;
-static unsigned long lastUnconsciousAlert = 0;
+// ── Cooldown tracking 
+static unsigned long lastGunshotAlert   = 0;
+static unsigned long lastFallAlert      = 0;
 
-// ── Co-occurrence tracking ─────────────────────────────────────────────────
-static String        lastFiredType = ALERT_NONE;
-static unsigned long lastFiredTime = 0;
-
-// ── BLE connection callbacks ───────────────────────────────────────────────
+// ── BLE connection callbacks
+// watches for phones connecting or disconnecting via BLE 
 class ServerCallbacks : public BLEServerCallbacks {
+    // prints "device connected"
     void onConnect(BLEServer* pServer) {
         Serial.println("[BLE] Device connected");
     }
+    // resets the LED flag and restarts Bluetooth adverstising
     void onDisconnect(BLEServer* pServer) {
+        ledConnectedSet = false;
         Serial.println("[BLE] Device disconnected — restarting advertising");
         BLEDevice::startAdvertising();
     }
 };
 
-// ── Build JSON payload
-static String buildPayload(String alertType, String confidence, String coOccurrence) {
+// ── Build JSON payload 
+// Packages the alert into a JSON string(standard text format)
+static String buildPayload(String alertType, String confidence) {
     String payload = "{";
-    payload += "\"type\":\""         + String(alertType)   + "\",";
-    payload += "\"confidence\":\""   + String(confidence)  + "\",";
-    payload += "\"co_occurrence\":\"" + String(coOccurrence) + "\"";
+    payload += "\"type\":\""       + alertType  + "\",";
+    payload += "\"confidence\":\"" + confidence + "\"";
     payload += "}";
     return payload;
 }
 
-// ── Co-occurrence check
-static String checkCoOccurrence(String currentType) {
-    unsigned long now = millis();
-    if (lastFiredType != ALERT_NONE &&
-        lastFiredType != currentType &&
-        (now - lastFiredTime) <= CO_OCCURRENCE_WINDOW_MS) {
-        return lastFiredType;
-    }
-    return ALERT_NONE;
-}
-
-// ── Send alert ─────────────────────────────────────────────────────────────
-static void sendAlert(String alertType, String confidence, unsigned long &lastAlertTime) {
-    // Connection check using server directly — avoids FreeRTOS flag race condition
-    if (pServer->getConnectedCount() == 0) {
+// ── Send alert 
+static void sendAlert(String alertType, String confidence,
+                      unsigned long &lastAlertTime) {
+    // Checks if anyone has connected via Bluetooth, if not don't send alert
+    if (pServer->getConnectedCount() == 0) { 
         Serial.println("[BLE] Not connected — alert suppressed");
         return;
     }
 
     unsigned long now = millis();
 
-    // Cooldown check
+    // Cooldown for alert sending
     if ((now - lastAlertTime) < COOLDOWN_MS) {
-        Serial.println("[BLE] Cooldown active for " + alertType + " — suppressed");
+        Serial.print("[BLE] Cooldown active for ");
+        Serial.print(alertType);
+        Serial.print(" — ");
+        Serial.print((COOLDOWN_MS - (now - lastAlertTime)) / 1000);
+        Serial.println("s remaining");
         return;
     }
 
-    // Co-occurrence check
-    String coOccurrence = checkCoOccurrence(alertType);
-
-    // Build and send
-    String payload = buildPayload(alertType, confidence, coOccurrence.c_str());
+    String payload = buildPayload(alertType, confidence);
+    // Loads the alert message into the Bluetooth channel
     pAlertCharacteristic->setValue(payload.c_str());
+
+    // Check if any client has notifications enabled before notifying
+    // BLE2902 descriptor holds the notification enable flag per client
+    BLE2902* desc = (BLE2902*)pAlertCharacteristic->getDescriptorByUUID(
+                        BLEUUID((uint16_t)0x2902));
+    bool notificationsEnabled = desc != nullptr && desc->getNotifications();
+
+    Serial.print("[BLE] Sending alert: ");
+    Serial.println(payload);
+    Serial.print("[BLE] Connected clients: ");
+    Serial.println(pServer->getConnectedCount());
+    Serial.print("[BLE] Notifications enabled: ");
+    Serial.println(notificationsEnabled ? "YES" : "NO  ← client must subscribe first");
+
+    // Sends the alert and records the time so the cooldown can kick in
     pAlertCharacteristic->notify();
+    lastAlertTime = now;
 
-    // Update tracking
-    lastAlertTime  = now;
-    lastFiredType  = alertType;
-    lastFiredTime  = now;
-
-    Serial.println("[BLE] Alert sent: " + payload);
+    Serial.println("[BLE] Notify called — alert sent");
 }
 
-// ── Public API ─────────────────────────────────────────────────────────────
-
+// ── Public API 
+// Turns on the LED and clears it
+// Initializes Bluetooth with a device name
+// Creates the Bluetooth server and alert channel
+// Starts advertising 
 void alertManagerInit() {
-// ── LED init
     led.begin();
     led.setBrightness(LED_BRIGHTNESS);
     led.clear();
     led.show();
 
     BLEDevice::init(BLE_DEVICE_NAME);
-    BLEDevice::setMTU(100);     
+    BLEDevice::setMTU(100);
 
     pServer = BLEDevice::createServer();
     pServer->setCallbacks(new ServerCallbacks());
@@ -130,16 +136,21 @@ void alertManagerInit() {
 }
 
 void alertManagerUpdate() {
-      uint32_t now = millis();
+    uint32_t now = millis();
 
     if (alertManagerIsConnected()) {
-        // ── Solid blue when connected ──────────────────────────────────────
-        led.setPixelColor(0, led.Color(0, 0, 255));
-        led.show();
+        // Turn LED solid blue once connected to BLE
+        if (!ledConnectedSet) {
+            led.setPixelColor(0, led.Color(0, 0, 255));
+            led.show();
+            ledConnectedSet = true;
+        }
     } else {
-        // ── Slow pulse while waiting for connection ────────────────────────
-        // Pulse period: ~2 seconds up, ~2 seconds down
-        if (now - lastPulseMs >= 20) {   // update brightness every 20ms
+        // Slowly pulse the LED blue (breathing effect)
+        ledConnectedSet = false;
+
+        // Slow pulse while waiting for connection
+        if (now - lastPulseMs >= 20) {
             lastPulseMs = now;
 
             if (pulseDirection == 1) {
@@ -164,21 +175,20 @@ void alertManagerUpdate() {
 }
 
 bool alertManagerIsConnected() {
-     return pServer->getConnectedCount() > 0;
+    return pServer->getConnectedCount() > 0;
 }
 
+// Sends a gunshot alert with a confidence level 
 void alertManagerSendGunshot(const char* confidence) {
     sendAlert(ALERT_GUNSHOT, confidence, lastGunshotAlert);
 }
 
+// Sends a fall-detect alert with a confidence level
 void alertManagerSendFall(const char* confidence) {
     sendAlert(ALERT_FALL, confidence, lastFallAlert);
 }
 
-void alertManagerSendUnconscious(const char* confidence) {
-    sendAlert(ALERT_UNCONSCIOUS, confidence, lastUnconsciousAlert);
-}
-
+// Sends any custom message directly
 void alertManagerSendRaw(const char* payload) {
     pAlertCharacteristic->setValue(payload);
     pAlertCharacteristic->notify();

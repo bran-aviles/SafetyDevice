@@ -20,8 +20,7 @@ bool alertManagerIsConnected();
 
 void alertManagerSendGunshot(const char* confidence);
 void alertManagerSendFall(const char* confidence);
-void alertManagerSendUnconscious(const char* confidence);
 
-// Sends any raw JSON string directly — no cooldown, no co-occurrence check
+// Sends any raw JSON string directly 
 // Used for live data broadcasts like BPM during testing
 void alertManagerSendRaw(const char* payload);

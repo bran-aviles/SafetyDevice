@@ -13,13 +13,15 @@ void heartMonitorUpdate();
 // Called by fusion logic to get current state
 uint8_t  heartMonitorGetBPM();
 bool     heartMonitorBaselineReady();
-bool     heartMonitorUnconsciousFlag();
+
 
 // Called by fall_detect when impact is confirmed
 void heartMonitorNotifyFall();
 
 // Called by audio_detect when gunshot event fires
 void heartMonitorNotifyAudioEvent();
+
+bool heartMonitorPathAActive();
 
 // Path A result — for fusion logic
 // Returns  1 if HR changed after audio event (supports gunshot)
