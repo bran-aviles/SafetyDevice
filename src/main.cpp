@@ -19,6 +19,7 @@ static bool     fallDuringEvent   = false;
 
 void setup() {
     Serial.begin(115200);
+    setCpuFrequencyMhz(80);   
     delay(2000);
 
     powerManagerInit();    // first — checks wake cause before anything else

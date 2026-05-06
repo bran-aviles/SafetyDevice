@@ -106,7 +106,6 @@ static void sendAlert(String alertType, String confidence,
 // Starts advertising 
 void alertManagerInit() {
     led.begin();
-    led.setBrightness(LED_BRIGHTNESS);
     led.clear();
     led.show();
 
